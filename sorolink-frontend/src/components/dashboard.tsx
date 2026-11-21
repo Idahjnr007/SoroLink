@@ -5,6 +5,14 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { ApiError, RateLimitError, downloadReport, getRun, getScenario, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioDetail, type ScenarioSummary } from "@/lib/api";
 
 const terminalStatuses = new Set(["passed", "failed", "cancelled"]);
+const DEFAULT_TAB_TITLE = "SoroLink – Stellar Testing Dashboard";
+
+export function getPollingDelay(pollAttempt: number, consecutiveFailures: number): number {
+  if (consecutiveFailures > 0) {
+    return Math.min(Math.pow(2, consecutiveFailures - 1) * 1000, 8000);
+  }
+  return Math.min(1000 * Math.pow(2, Math.max(0, pollAttempt)), 8000);
+}
 
 export type ScenarioFilter = "all" | "xlm" | "issued-asset" | "expected-failure";
 export type SortOrder = "name-asc" | "name-desc" | "id-asc";
@@ -148,7 +156,9 @@ export function Dashboard() {
   const [isBrowserOffline, setIsBrowserOffline] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"report" | "compare">("report");
-  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
+  const pollAttemptRef = useRef(0);
+  const lastRunIdRef = useRef<string | null>(null);
 
   const handleExitOffline = () => {
     setIsOffline(false);
@@ -424,6 +434,21 @@ export function Dashboard() {
     }
   };
 
+  // #25 — Update browser tab title to reflect active run status
+  useEffect(() => {
+    if (!run) {
+      document.title = DEFAULT_TAB_TITLE;
+      return;
+    }
+    if (run.status === "passed") {
+      document.title = `✅ ${run.scenarioId} passed – SoroLink`;
+    } else if (run.status === "failed") {
+      document.title = `❌ ${run.scenarioId} failed – SoroLink`;
+    } else {
+      document.title = `⏳ Running ${run.scenarioId} – SoroLink`;
+    }
+  }, [run]);
+
   const loadScenarios = useCallback(() => {
     let active = true;
     const controller = new AbortController();
@@ -479,6 +504,10 @@ export function Dashboard() {
     if (consecutiveFailures >= 5 && !reconnectRead) return; // Exhausted retries
 
     const activeRunId = run.id;
+    if (lastRunIdRef.current !== activeRunId) {
+      lastRunIdRef.current = activeRunId;
+      pollAttemptRef.current = 0;
+    }
     let active = true;
     let timerId: number | null = null;
     let inFlightController: AbortController | null = null;
@@ -499,6 +528,7 @@ export function Dashboard() {
       try {
         const updatedRun = await getRun(activeRunId, controller.signal);
         if (!active || !wasVisible || currentRequestVersion !== requestVersion) return;
+        pollAttemptRef.current += 1;
         setRun(updatedRun);
         setConsecutiveFailures(0);
         setPollingError(null);
@@ -547,7 +577,7 @@ export function Dashboard() {
       void poll();
     }
 
-    const delay = consecutiveFailures === 0 ? 1000 : Math.pow(2, consecutiveFailures - 1) * 1000;
+    const delay = getPollingDelay(pollAttemptRef.current, consecutiveFailures);
     document.addEventListener("visibilitychange", handleVisibilityChange);
     if (reconnectRead) {
       reconnectedRef.current = false;
@@ -576,6 +606,8 @@ export function Dashboard() {
     if (rateLimitCountdown !== null) return;
     setStarting(true);
     setError(null);
+    pollAttemptRef.current = 0;
+    lastRunIdRef.current = null;
     setRun(null);
     try {
       const key = crypto.randomUUID();
@@ -1493,6 +1525,28 @@ function ReportComparisonView({ currentRun }: { currentRun: RunReport | null }) 
   );
 }
 
+function AssertionStatusIcon({ status }: { status: string }) {
+  if (status === "passed") {
+    return (
+      <svg viewBox="0 0 16 16" fill="none" role="img" aria-label="Passed assertion" style={{ stroke: "#15803d" }}>
+        <path d="m3 8 3 3 7-7" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <svg viewBox="0 0 16 16" fill="none" role="img" aria-label="Failed assertion" style={{ stroke: "#b91c1c" }}>
+        <path d="M4 4l8 8M12 4l-8 8" strokeWidth="2" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 16 16" fill="none" role="img" aria-label="Skipped assertion" style={{ stroke: "#6e7169" }}>
+      <path d="M3 8h10" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 // #34 — Expandable assertion row with expected / actual values
 function AssertionRow({ assertion, reportFilter }: { assertion: import("@/lib/api").AssertionResult; reportFilter?: ReportFilter }) {
   const [expanded, setExpanded] = useState(false);
@@ -1508,7 +1562,7 @@ function AssertionRow({ assertion, reportFilter }: { assertion: import("@/lib/ap
 
   return (
     <div className={`assertion report-row ${isFailed && hasDiff ? "assertion--has-diff" : ""}`} hidden={reportFilter === "failed" && assertion.status !== "failed"}>
-      <span className={`step-dot ${assertion.status}`}><CheckIcon /></span>
+      <span className={`step-dot ${assertion.status}`}><AssertionStatusIcon status={assertion.status} /></span>
       <div className="assertion-body">
         <span className="label">ASSERTION / {assertion.type}</span>
         <span className="print-status-label">{titleCase(assertion.status)}</span>

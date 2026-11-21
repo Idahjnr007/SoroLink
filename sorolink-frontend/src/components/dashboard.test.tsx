@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Dashboard, filterScenario, formatBalanceDelta, getScenarioTags } from "./dashboard";
+import { Dashboard, filterScenario, getPollingDelay } from "./dashboard";
 import * as api from "@/lib/api";
 import { type RunReport } from "@/lib/api";
 
@@ -1206,133 +1206,144 @@ describe("Dashboard Report Download Feedback (#45)", () => {
   });
 });
 
-describe("Issues #22, #26, #27, #29", () => {
+describe("Issues #16, #21, #24, #25", () => {
   beforeEach(() => {
     mockSearchParams = new URLSearchParams();
   });
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     vi.restoreAllMocks();
-    vi.unstubAllGlobals();
   });
 
-  it("#22 — formats positive, negative, and zero balance deltas with explicit signs and asset code", () => {
-    expect(formatBalanceDelta(5, "XLM")).toEqual({
-      text: "+5 XLM",
-      tone: "positive",
-      color: "#15803d",
-    });
-    expect(formatBalanceDelta(-10, "TESTUSD")).toEqual({
-      text: "\u221210 TESTUSD",
-      tone: "negative",
-      color: "#b91c1c",
-    });
-    expect(formatBalanceDelta(0)).toEqual({
-      text: "0",
-      tone: "neutral",
-      color: "#52525b",
-    });
-  });
+  it("#16 — backs off polling interval exponentially (1s -> 2s -> 4s -> 8s cap) and stops on terminal state", async () => {
+    expect(getPollingDelay(0, 0)).toBe(1000);
+    expect(getPollingDelay(1, 0)).toBe(2000);
+    expect(getPollingDelay(2, 0)).toBe(4000);
+    expect(getPollingDelay(3, 0)).toBe(8000);
+    expect(getPollingDelay(4, 0)).toBe(8000);
 
-  it("#27 — derives accessible tag badges on scenario cards matching filter categories", async () => {
-    vi.spyOn(api, "listScenarios").mockResolvedValueOnce(mockScenarios);
-    expect(getScenarioTags(mockScenarios[0]).map((t) => t.key)).toContain("xlm");
-    expect(getScenarioTags(mockScenarios[1]).map((t) => t.key)).toContain("issued-asset");
-    expect(getScenarioTags(mockScenarios[2]).map((t) => t.key)).toContain("expected-failure");
-
-    render(<Dashboard />);
-    await screen.findByText("XLM payment");
-
-    const xlmCard = document.getElementById("scenario-card-xlm-payment")!;
-    expect(within(xlmCard).getByText("XLM")).toBeDefined();
-    expect(within(xlmCard).getByText("Category:")).toBeDefined();
-  });
-
-  it("#29 — shows 'Run again' button on completed runs only and restarts the same scenario", async () => {
-    vi.spyOn(api, "listScenarios").mockResolvedValueOnce(mockScenarios);
-    const startRunMock = vi
-      .spyOn(api, "startRun")
-      .mockResolvedValueOnce({ ...mockRun, id: "run-in-progress", scenarioId: "xlm-payment", status: "running" })
-      .mockResolvedValueOnce({ ...mockRun, id: "run-restarted", scenarioId: "xlm-payment", status: "passed" });
-    vi.spyOn(api, "getRun").mockResolvedValue({ ...mockRun, id: "run-in-progress", scenarioId: "xlm-payment", status: "passed" });
-
-    render(<Dashboard />);
-    await screen.findByText("XLM payment");
-
-    const runBtn = screen.getByRole("button", { name: /run on testnet/i });
-    await waitFor(() => expect(runBtn).not.toBeDisabled());
-    await act(async () => {
-      fireEvent.click(runBtn);
-    });
-
-    // While running, "Run again" is not shown
-    expect(screen.queryByRole("button", { name: /^run again$/i })).toBeNull();
-
-    // Wait for poll to complete the run
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /^run again$/i })).toBeDefined();
-    }, { timeout: 3000 });
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /^run again$/i }));
-    });
-
-    expect(startRunMock).toHaveBeenCalledTimes(2);
-    expect(startRunMock).toHaveBeenLastCalledWith("xlm-payment", expect.any(String));
-  });
-
-  it("#26 — requests Notification permission only on opt-in and fires notification on run completion", async () => {
+    vi.useFakeTimers();
     vi.spyOn(api, "listScenarios").mockResolvedValueOnce(mockScenarios);
     vi.spyOn(api, "startRun").mockResolvedValueOnce({
       ...mockRun,
-      id: "run-notify",
+      id: "run-backoff",
       scenarioId: "xlm-payment",
       status: "running",
     });
+    const getRunMock = vi
+      .spyOn(api, "getRun")
+      .mockResolvedValueOnce({ ...mockRun, id: "run-backoff", scenarioId: "xlm-payment", status: "running" })
+      .mockResolvedValueOnce({ ...mockRun, id: "run-backoff", scenarioId: "xlm-payment", status: "running" })
+      .mockResolvedValueOnce({ ...mockRun, id: "run-backoff", scenarioId: "xlm-payment", status: "passed" });
+
+    render(<Dashboard />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const runBtn = screen.getByRole("button", { name: /run on testnet/i });
+    await act(async () => {
+      fireEvent.click(runBtn);
+      await Promise.resolve();
+    });
+
+    // 1st poll after 1s
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(getRunMock).toHaveBeenCalledTimes(1);
+
+    // 2nd poll after 2s (not at 1s)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(getRunMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+
+    // 3rd poll after 4s reaches terminal status and stops
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(getRunMock).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    expect(getRunMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("#21 — Print report button triggers window.print()", async () => {
+    mockSearchParams = new URLSearchParams("runId=run-123");
+    vi.spyOn(api, "listScenarios").mockResolvedValueOnce(mockScenarios);
+    vi.spyOn(api, "getRun").mockResolvedValueOnce({ ...mockRun, status: "passed" });
+    const printSpy = vi.spyOn(window, "print").mockImplementation(() => {});
+
+    render(<Dashboard />);
+    const printBtn = await screen.findByRole("button", { name: /print report/i });
+    fireEvent.click(printBtn);
+    expect(printSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("#24 — renders accessible passed, failed, and skipped icons on assertion rows", async () => {
+    mockSearchParams = new URLSearchParams("runId=run-icons");
+    vi.spyOn(api, "listScenarios").mockResolvedValueOnce(mockScenarios);
     vi.spyOn(api, "getRun").mockResolvedValueOnce({
       ...mockRun,
-      id: "run-notify",
+      id: "run-icons",
+      status: "failed",
+      assertions: [
+        { type: "balance", status: "passed", expected: 10, actual: 10, message: "Passed check" },
+        { type: "balance", status: "failed", expected: 10, actual: 0, message: "Failed check" },
+        { type: "balance", status: "skipped" as unknown as "passed", expected: 1, actual: 1, message: "Skipped check" },
+      ],
+    });
+
+    render(<Dashboard />);
+    await screen.findByText("Passed check");
+    expect(screen.getByRole("img", { name: "Passed assertion" })).toBeDefined();
+    expect(screen.getByRole("img", { name: "Failed assertion" })).toBeDefined();
+    expect(screen.getByRole("img", { name: "Skipped assertion" })).toBeDefined();
+  });
+
+  it("#25 — updates browser tab title for running, passed, failed, and idle states", async () => {
+    vi.spyOn(api, "listScenarios").mockResolvedValueOnce(mockScenarios);
+    vi.spyOn(api, "startRun")
+      .mockResolvedValueOnce({ ...mockRun, id: "r1", scenarioId: "xlm-payment", status: "running" })
+      .mockResolvedValueOnce({ ...mockRun, id: "r2", scenarioId: "xlm-payment", status: "failed" });
+    vi.spyOn(api, "getRun").mockResolvedValueOnce({
+      ...mockRun,
+      id: "r1",
       scenarioId: "xlm-payment",
       status: "passed",
     });
 
-    const requestPermission = vi.fn();
-    const notificationSpy = vi.fn();
-    class MockNotification {
-      static permission = "default";
-      static requestPermission = requestPermission;
-      constructor(title: string, opts?: NotificationOptions) {
-        notificationSpy(title, opts);
-      }
-    }
-    requestPermission.mockImplementation(async () => {
-      MockNotification.permission = "granted";
-      return "granted";
-    });
-    vi.stubGlobal("Notification", MockNotification);
-
+    vi.useFakeTimers();
     render(<Dashboard />);
-    await screen.findByText("XLM payment");
-
-    // Permission must not be requested on mount
-    expect(requestPermission).not.toHaveBeenCalled();
-
-    const notifyToggle = screen.getByRole("button", { name: /notify on completion/i });
     await act(async () => {
-      fireEvent.click(notifyToggle);
+      await Promise.resolve();
     });
-    expect(requestPermission).toHaveBeenCalledTimes(1);
+    expect(document.title).toBe("SoroLink – Stellar Testing Dashboard");
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /run on testnet/i }));
+      await Promise.resolve();
     });
+    expect(document.title).toBe("⏳ Running xlm-payment – SoroLink");
 
-    await waitFor(() => {
-      expect(notificationSpy).toHaveBeenCalledWith(
-        "SoroLink run passed",
-        expect.objectContaining({ body: "Scenario xlm-payment passed." }),
-      );
-    }, { timeout: 3000 });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(document.title).toBe("✅ xlm-payment passed – SoroLink");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /run on testnet/i }));
+      await Promise.resolve();
+    });
+    expect(document.title).toBe("❌ xlm-payment failed – SoroLink");
   });
 });

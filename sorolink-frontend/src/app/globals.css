@@ -371,3 +371,18 @@ button.download:focus-visible {
 
 /* ── Run button rate-limit note (#39) ───────────────────────────────────── */
 .rate-limit-note { font:400 12px var(--font-mono); color:var(--muted); margin:6px 0 0; }
+
+/* ── Print / PDF export stylesheet (#21) ───────────────────────────────── */
+@media print {
+  @page { size: auto; margin: 14mm; }
+  body { background: #fff; color: #000; }
+  .hero, .workspace, .docs-link, .report-controls, .running-row, .copy-control, .download, .tx-actions a, footer {
+    display: none !important;
+  }
+  .shell { width: 100%; margin: 0; }
+  .results { padding-block: 0; min-height: 0; }
+  .report-grid { display: block; }
+  .timeline-card, .summary-card { border: 1px solid #999; background: #fff; break-inside: avoid; margin-bottom: 12px; }
+  .print-report-header, .print-only, .print-status-label { display: block !important; }
+  .transaction-hash.print-only { word-break: break-all; font: 500 10px var(--font-mono); }
+}
