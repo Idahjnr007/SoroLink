@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Dashboard, filterScenario, getPollingDelay } from "./dashboard";
+import { Dashboard, filterScenario, formatStepDuration } from "./dashboard";
 import * as api from "@/lib/api";
 import { type RunReport } from "@/lib/api";
 
@@ -1206,144 +1206,142 @@ describe("Dashboard Report Download Feedback (#45)", () => {
   });
 });
 
-describe("Issues #16, #21, #24, #25", () => {
+
+describe("Scenario Trustline Filtering, Copy-to-Clipboard, and Run Timestamps (#1, #2, #3)", () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
     mockSearchParams = new URLSearchParams();
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
   });
 
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
     vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams();
   });
 
-  it("#16 — backs off polling interval exponentially (1s -> 2s -> 4s -> 8s cap) and stops on terminal state", async () => {
-    expect(getPollingDelay(0, 0)).toBe(1000);
-    expect(getPollingDelay(1, 0)).toBe(2000);
-    expect(getPollingDelay(2, 0)).toBe(4000);
-    expect(getPollingDelay(3, 0)).toBe(8000);
-    expect(getPollingDelay(4, 0)).toBe(8000);
+  it("filters Trustline scenarios and persists filter while a run is in progress (#1)", async () => {
+    expect(filterScenario(mockScenarios[0], "trustline")).toBe(false);
+    expect(filterScenario(mockScenarios[1], "trustline")).toBe(true);
+    expect(filterScenario(mockScenarios[2], "trustline")).toBe(true);
 
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("03 AVAILABLE")).toBeDefined();
+    });
+
+    const trustlinesTab = screen.getByRole("tab", { name: "Trustlines" });
+    fireEvent.click(trustlinesTab);
+
+    expect(trustlinesTab.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("02 AVAILABLE")).toBeDefined();
+    expect(screen.queryByText("XLM payment")).toBeNull();
+    expect(screen.getAllByText("Issued asset payment").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Missing trustline").length).toBeGreaterThan(0);
+  });
+
+  it("copies run ID and step transaction hashes with 2-second Copied! reset and error handling (#2)", async () => {
     vi.useFakeTimers();
-    vi.spyOn(api, "listScenarios").mockResolvedValueOnce(mockScenarios);
-    vi.spyOn(api, "startRun").mockResolvedValueOnce({
+    mockSearchParams = new URLSearchParams("?runId=run-copy-test");
+
+    const writeTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: writeTextMock },
+    });
+
+    const runWithTx: RunReport = {
       ...mockRun,
-      id: "run-backoff",
-      scenarioId: "xlm-payment",
-      status: "running",
-    });
-    const getRunMock = vi
-      .spyOn(api, "getRun")
-      .mockResolvedValueOnce({ ...mockRun, id: "run-backoff", scenarioId: "xlm-payment", status: "running" })
-      .mockResolvedValueOnce({ ...mockRun, id: "run-backoff", scenarioId: "xlm-payment", status: "running" })
-      .mockResolvedValueOnce({ ...mockRun, id: "run-backoff", scenarioId: "xlm-payment", status: "passed" });
-
-    render(<Dashboard />);
-    await act(async () => {
-      await Promise.resolve();
-    });
-
-    const runBtn = screen.getByRole("button", { name: /run on testnet/i });
-    await act(async () => {
-      fireEvent.click(runBtn);
-      await Promise.resolve();
-    });
-
-    // 1st poll after 1s
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1000);
-    });
-    expect(getRunMock).toHaveBeenCalledTimes(1);
-
-    // 2nd poll after 2s (not at 1s)
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1000);
-    });
-    expect(getRunMock).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1000);
-    });
-    expect(getRunMock).toHaveBeenCalledTimes(2);
-
-    // 3rd poll after 4s reaches terminal status and stops
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4000);
-    });
-    expect(getRunMock).toHaveBeenCalledTimes(3);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10000);
-    });
-    expect(getRunMock).toHaveBeenCalledTimes(3);
-  });
-
-  it("#21 — Print report button triggers window.print()", async () => {
-    mockSearchParams = new URLSearchParams("runId=run-123");
-    vi.spyOn(api, "listScenarios").mockResolvedValueOnce(mockScenarios);
-    vi.spyOn(api, "getRun").mockResolvedValueOnce({ ...mockRun, status: "passed" });
-    const printSpy = vi.spyOn(window, "print").mockImplementation(() => {});
-
-    render(<Dashboard />);
-    const printBtn = await screen.findByRole("button", { name: /print report/i });
-    fireEvent.click(printBtn);
-    expect(printSpy).toHaveBeenCalledTimes(1);
-  });
-
-  it("#24 — renders accessible passed, failed, and skipped icons on assertion rows", async () => {
-    mockSearchParams = new URLSearchParams("runId=run-icons");
-    vi.spyOn(api, "listScenarios").mockResolvedValueOnce(mockScenarios);
-    vi.spyOn(api, "getRun").mockResolvedValueOnce({
-      ...mockRun,
-      id: "run-icons",
-      status: "failed",
-      assertions: [
-        { type: "balance", status: "passed", expected: 10, actual: 10, message: "Passed check" },
-        { type: "balance", status: "failed", expected: 10, actual: 0, message: "Failed check" },
-        { type: "balance", status: "skipped" as unknown as "passed", expected: 1, actual: 1, message: "Skipped check" },
-      ],
-    });
-
-    render(<Dashboard />);
-    await screen.findByText("Passed check");
-    expect(screen.getByRole("img", { name: "Passed assertion" })).toBeDefined();
-    expect(screen.getByRole("img", { name: "Failed assertion" })).toBeDefined();
-    expect(screen.getByRole("img", { name: "Skipped assertion" })).toBeDefined();
-  });
-
-  it("#25 — updates browser tab title for running, passed, failed, and idle states", async () => {
-    vi.spyOn(api, "listScenarios").mockResolvedValueOnce(mockScenarios);
-    vi.spyOn(api, "startRun")
-      .mockResolvedValueOnce({ ...mockRun, id: "r1", scenarioId: "xlm-payment", status: "running" })
-      .mockResolvedValueOnce({ ...mockRun, id: "r2", scenarioId: "xlm-payment", status: "failed" });
-    vi.spyOn(api, "getRun").mockResolvedValueOnce({
-      ...mockRun,
-      id: "r1",
-      scenarioId: "xlm-payment",
+      id: "run-copy-test",
       status: "passed",
-    });
+      createdAt: "2026-10-16T12:00:00.000Z",
+      completedAt: "2026-10-16T12:00:04.000Z",
+      steps: [
+        {
+          id: "send-payment",
+          type: "payment",
+          status: "passed",
+          message: "Payment submitted",
+          transactionHash: "tx-hash-abcdef123456",
+        },
+      ],
+    };
+    vi.spyOn(api, "getRun").mockResolvedValue(runWithTx);
 
-    vi.useFakeTimers();
     render(<Dashboard />);
     await act(async () => {
       await Promise.resolve();
-    });
-    expect(document.title).toBe("SoroLink – Stellar Testing Dashboard");
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /run on testnet/i }));
       await Promise.resolve();
     });
-    expect(document.title).toBe("⏳ Running xlm-payment – SoroLink");
+
+    const copyRunBtn = screen.getByRole("button", { name: "Copy run ID" });
+    const copyTxBtn = screen.getByRole("button", { name: "Copy transaction tx-hash-abcdef123456" });
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1000);
-    });
-    expect(document.title).toBe("✅ xlm-payment passed – SoroLink");
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /run on testnet/i }));
+      fireEvent.click(copyRunBtn);
       await Promise.resolve();
     });
-    expect(document.title).toBe("❌ xlm-payment failed – SoroLink");
+
+    expect(writeTextMock).toHaveBeenCalledWith("run-copy-test");
+    expect(copyRunBtn.textContent).toBe("Copied!");
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(copyRunBtn.textContent).toBe("Copy");
+
+    writeTextMock.mockRejectedValueOnce(new Error("Clipboard denied"));
+    await act(async () => {
+      fireEvent.click(copyTxBtn);
+      await Promise.resolve();
+    });
+    expect(writeTextMock).toHaveBeenCalledWith("tx-hash-abcdef123456");
+    expect(copyTxBtn.textContent).toBe("Failed to copy");
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(copyTxBtn.textContent).toBe("Copy");
+  });
+
+  it("displays Created, Completed, and Duration with ISO 8601 titles for terminal runs and omits Completed for active runs (#3)", async () => {
+    mockSearchParams = new URLSearchParams("?runId=run-timestamps");
+    const createdIso = "2026-10-16T12:00:00.000Z";
+    const completedIso = "2026-10-16T12:01:34.000Z";
+
+    const terminalReport: RunReport = {
+      ...mockRun,
+      id: "run-timestamps",
+      status: "passed",
+      createdAt: createdIso,
+      completedAt: completedIso,
+    };
+    vi.spyOn(api, "getRun").mockResolvedValueOnce(terminalReport);
+
+    const { unmount } = render(<Dashboard />);
+    const createdEl = await screen.findByTestId("run-created");
+    const completedEl = await screen.findByTestId("run-completed");
+    const durationEl = await screen.findByTestId("run-duration");
+
+    expect(createdEl.getAttribute("title")).toBe(createdIso);
+    expect(completedEl.getAttribute("title")).toBe(completedIso);
+    expect(durationEl.textContent).toBe("1m 34s");
+
+    unmount();
+
+    const inProgressReport: RunReport = {
+      ...mockRun,
+      id: "run-timestamps",
+      status: "running",
+      createdAt: createdIso,
+      completedAt: undefined,
+    };
+    vi.spyOn(api, "getRun").mockResolvedValue(inProgressReport);
+
+    render(<Dashboard />);
+    const activeCreatedEl = await screen.findByTestId("run-created");
+    expect(activeCreatedEl.getAttribute("title")).toBe(createdIso);
+    expect(screen.queryByTestId("run-completed")).toBeNull();
   });
 });

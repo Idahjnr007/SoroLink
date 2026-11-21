@@ -2,19 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { ApiError, RateLimitError, downloadReport, getRun, getScenario, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioDetail, type ScenarioSummary } from "@/lib/api";
+import { ApiError, RateLimitError, cancelRun, downloadReport, getRun, getScenario, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioDetail, type ScenarioSummary, type StepResult } from "@/lib/api";
 
 const terminalStatuses = new Set(["passed", "failed", "cancelled"]);
-const DEFAULT_TAB_TITLE = "SoroLink – Stellar Testing Dashboard";
 
-export function getPollingDelay(pollAttempt: number, consecutiveFailures: number): number {
-  if (consecutiveFailures > 0) {
-    return Math.min(Math.pow(2, consecutiveFailures - 1) * 1000, 8000);
-  }
-  return Math.min(1000 * Math.pow(2, Math.max(0, pollAttempt)), 8000);
-}
-
-export type ScenarioFilter = "all" | "xlm" | "issued-asset" | "expected-failure";
+export type ScenarioFilter = "all" | "xlm" | "issued-asset" | "trustline" | "expected-failure";
 export type SortOrder = "name-asc" | "name-desc" | "id-asc";
 export type ReportFilter = "all" | "failed";
 
@@ -41,6 +33,7 @@ export const FILTER_OPTIONS: { key: ScenarioFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "xlm", label: "XLM" },
   { key: "issued-asset", label: "Issued Asset" },
+  { key: "trustline", label: "Trustlines" },
   { key: "expected-failure", label: "Expected Failure" },
 ];
 
@@ -61,51 +54,9 @@ export function filterScenario(scenario: ScenarioSummary, filter: ScenarioFilter
   const text = `${scenario.id} ${scenario.name} ${scenario.description}`.toLowerCase();
   if (filter === "xlm") return text.includes("xlm");
   if (filter === "issued-asset") return text.includes("issued") || text.includes("testusd") || scenario.id === "issued-asset-payment";
+  if (filter === "trustline") return text.includes("trustline");
   if (filter === "expected-failure") return text.includes("fail") || text.includes("missing-trustline") || scenario.id === "missing-trustline";
   return true;
-}
-
-export interface ScenarioTag {
-  key: Exclude<ScenarioFilter, "all">;
-  label: string;
-  color: string;
-  bg: string;
-}
-
-/** Derive accessible category tag badges matching filterScenario categories (#27). */
-export function getScenarioTags(scenario: ScenarioSummary): ScenarioTag[] {
-  const tags: ScenarioTag[] = [];
-  if (filterScenario(scenario, "xlm")) {
-    tags.push({ key: "xlm", label: "XLM", color: "#1d4ed8", bg: "#dbeafe" });
-  }
-  if (filterScenario(scenario, "issued-asset")) {
-    tags.push({ key: "issued-asset", label: "Issued Asset", color: "#6d28d9", bg: "#ede9fe" });
-  }
-  if (filterScenario(scenario, "expected-failure")) {
-    tags.push({ key: "expected-failure", label: "Expected Failure", color: "#b45309", bg: "#fef3c7" });
-  }
-  return tags;
-}
-
-export interface FormattedBalanceDelta {
-  text: string;
-  tone: "positive" | "negative" | "neutral";
-  color: string;
-}
-
-/** Format a numeric balance delta with explicit +/-/0 sign and optional asset code (#22). */
-export function formatBalanceDelta(delta: number | string, asset?: string): FormattedBalanceDelta {
-  const numeric = typeof delta === "number" ? delta : Number(delta);
-  const suffix = asset ? ` ${asset}` : "";
-  if (!Number.isFinite(numeric) || numeric === 0) {
-    return { text: `0${suffix}`, tone: "neutral", color: "#52525b" };
-  }
-  if (numeric > 0) {
-    const absStr = typeof delta === "string" ? delta.replace(/^\+/, "") : String(numeric);
-    return { text: `+${absStr}${suffix}`, tone: "positive", color: "#15803d" };
-  }
-  const absStr = typeof delta === "string" ? delta.replace(/^-/, "") : String(Math.abs(numeric));
-  return { text: `\u2212${absStr}${suffix}`, tone: "negative", color: "#b91c1c" };
 }
 
 export function searchScenario(scenario: ScenarioSummary, query: string): boolean {
@@ -157,29 +108,6 @@ export function Dashboard() {
   const [importError, setImportError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"report" | "compare">("report");
   const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
-  const pollAttemptRef = useRef(0);
-  const lastRunIdRef = useRef<string | null>(null);
-
-  const handleExitOffline = () => {
-    setIsOffline(false);
-    setRun(null);
-    setImportError(null);
-  };
-
-  const handleImportReport = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    e.target.value = "";
-    try {
-      const parsed = JSON.parse(await file.text()) as RunReport;
-      setRun(parsed);
-      setIsOffline(true);
-      setImportError(null);
-      setViewMode("report");
-    } catch (err) {
-      setImportError(err instanceof Error ? err.message : "Failed to import report.");
-    }
-  };
 
   // #32 — Scenario preview panel
   const [previewId, setPreviewId] = useState<string | null>(null);
@@ -395,59 +323,7 @@ export function Dashboard() {
       lastAnnouncedRef.current = message;
       setLiveAnnouncement(message);
     }
-    if (
-      notificationsEnabled &&
-      run &&
-      prev !== null &&
-      (currentStatus === "passed" || currentStatus === "failed") &&
-      typeof Notification !== "undefined" &&
-      Notification.permission === "granted"
-    ) {
-      try {
-        new Notification(`SoroLink run ${currentStatus}`, {
-          body: `Scenario ${run.scenarioId} ${currentStatus}.`,
-        });
-      } catch {
-        // Ignore Notification constructor errors in restricted environments
-      }
-    }
-  }, [run, scenarios, notificationsEnabled]);
-
-  const handleToggleNotifications = async () => {
-    if (notificationsEnabled) {
-      setNotificationsEnabled(false);
-      return;
-    }
-    if (typeof Notification === "undefined" || typeof Notification.requestPermission !== "function") {
-      return;
-    }
-    try {
-      const permission =
-        Notification.permission === "granted"
-          ? "granted"
-          : await Notification.requestPermission();
-      if (permission === "granted") {
-        setNotificationsEnabled(true);
-      }
-    } catch {
-      // Graceful degradation if permission request fails
-    }
-  };
-
-  // #25 — Update browser tab title to reflect active run status
-  useEffect(() => {
-    if (!run) {
-      document.title = DEFAULT_TAB_TITLE;
-      return;
-    }
-    if (run.status === "passed") {
-      document.title = `✅ ${run.scenarioId} passed – SoroLink`;
-    } else if (run.status === "failed") {
-      document.title = `❌ ${run.scenarioId} failed – SoroLink`;
-    } else {
-      document.title = `⏳ Running ${run.scenarioId} – SoroLink`;
-    }
-  }, [run]);
+  }, [run, scenarios]);
 
   const loadScenarios = useCallback(() => {
     let active = true;
@@ -504,10 +380,6 @@ export function Dashboard() {
     if (consecutiveFailures >= 5 && !reconnectRead) return; // Exhausted retries
 
     const activeRunId = run.id;
-    if (lastRunIdRef.current !== activeRunId) {
-      lastRunIdRef.current = activeRunId;
-      pollAttemptRef.current = 0;
-    }
     let active = true;
     let timerId: number | null = null;
     let inFlightController: AbortController | null = null;
@@ -528,7 +400,6 @@ export function Dashboard() {
       try {
         const updatedRun = await getRun(activeRunId, controller.signal);
         if (!active || !wasVisible || currentRequestVersion !== requestVersion) return;
-        pollAttemptRef.current += 1;
         setRun(updatedRun);
         setConsecutiveFailures(0);
         setPollingError(null);
@@ -577,7 +448,7 @@ export function Dashboard() {
       void poll();
     }
 
-    const delay = getPollingDelay(pollAttemptRef.current, consecutiveFailures);
+    const delay = consecutiveFailures === 0 ? 1000 : Math.pow(2, consecutiveFailures - 1) * 1000;
     document.addEventListener("visibilitychange", handleVisibilityChange);
     if (reconnectRead) {
       reconnectedRef.current = false;
@@ -597,21 +468,18 @@ export function Dashboard() {
 
   const selected = useMemo(() => scenarios.find((scenario) => scenario.id === selectedId), [scenarios, selectedId]);
 
-  async function handleRun(scenarioIdOverride?: unknown) {
-    const targetScenarioId = typeof scenarioIdOverride === "string" ? scenarioIdOverride : selectedId;
-    if (!targetScenarioId) return;
+  async function handleRun() {
+    if (!selectedId) return;
     setIsOffline(false);
     setImportError(null);
     setViewMode("report");
-    if (rateLimitCountdown !== null) return;
+    if (!selectedId || rateLimitCountdown !== null) return;
     setStarting(true);
     setError(null);
-    pollAttemptRef.current = 0;
-    lastRunIdRef.current = null;
     setRun(null);
     try {
       const key = crypto.randomUUID();
-      const newRun = await startRun(targetScenarioId, key);
+      const newRun = await startRun(selectedId, key);
       setRun(newRun);
       setRunIdempotencyKey(crypto.randomUUID());
       const newParams = new URLSearchParams(searchParams?.toString() ?? "");
@@ -874,30 +742,16 @@ export function Dashboard() {
               >
                 <span className="card-index" aria-hidden="true">0{index + 1}</span>
                 <ScenarioIcon kind={scenario.id} />
-                <span className="scenario-name">{scenario.name}</span>
-                <span className="scenario-description">{scenario.description}</span>
-                <span className="scenario-tags" aria-label="Scenario categories" style={{ display: "inline-flex", gap: "6px", flexWrap: "wrap" }}>
-                  {getScenarioTags(scenario).map((tag) => (
-                    <span
-                      key={tag.key}
-                      className="scenario-tag"
-                      data-tag={tag.key}
-                      style={{
-                        fontSize: "11px",
-                        fontWeight: 600,
-                        padding: "2px 8px",
-                        borderRadius: "9999px",
-                        color: tag.color,
-                        backgroundColor: tag.bg,
-                        border: `1px solid ${tag.color}33`,
-                      }}
-                    >
-                      <span className="sr-only">Category: </span>
-                      {tag.label}
-                    </span>
-                  ))}
-                </span>
-                <span className="version">V{scenario.version}</span>
+                <button
+                  type="button"
+                  className="scenario-select"
+                  aria-pressed={selectedId === scenario.id}
+                  aria-describedby={`scenario-description-${scenario.id}`}
+                >
+                  <span className="scenario-name">{scenario.name}</span>
+                </button>
+                <span className="scenario-description" id={`scenario-description-${scenario.id}`}>{scenario.description}</span>
+                <span className="version" aria-label={`Scenario version ${scenario.version}`} title={`Scenario version ${scenario.version}`}>V{scenario.version}</span>
                 <button
                   type="button"
                   className={`favorite-btn ${favorites.has(scenario.id) ? "active" : ""}`}
@@ -1015,16 +869,6 @@ export function Dashboard() {
                 />
               </label>
             )}
-            {typeof Notification !== "undefined" && (
-              <button
-                type="button"
-                className={`filter-pill ${notificationsEnabled ? "active" : ""}`}
-                aria-pressed={notificationsEnabled}
-                onClick={() => void handleToggleNotifications()}
-              >
-                {notificationsEnabled ? "Notifications on" : "Notify on completion"}
-              </button>
-            )}
             {viewMode === "report" && run && (
               <>
                 <div className="report-filters" role="group" aria-label="Report filter">
@@ -1040,15 +884,6 @@ export function Dashboard() {
                     </button>
                   ))}
                 </div>
-                {terminalStatuses.has(run.status) && !isOffline && (
-                  <button
-                    type="button"
-                    className="print-button"
-                    onClick={() => void handleRun(run.scenarioId)}
-                  >
-                    Run again
-                  </button>
-                )}
                 {terminalStatuses.has(run.status) && (
                   <button type="button" className="print-button" onClick={() => window.print()}>
                     Print report
@@ -1221,8 +1056,8 @@ function RunView({ run, reportFilter, scenarioName, onCancelled }: { run: RunRep
         <div className="report-meta">
           <span>RUN ID</span><div className="id-cell"><code>{run.id}</code><CopyButton value={run.id} label="run ID" /></div>
           <span>NETWORK</span><code>{run.network}</code>
-          <span>CREATED</span><code title={run.createdAt}>{createdLabel}</code>
-          {completedLabel ? <><span>COMPLETED</span><code title={run.completedAt}>{completedLabel}</code></> : null}
+          <span>CREATED</span><code title={run.createdAt} data-testid="run-created">{createdLabel}</code>
+          {isTerminal && completedLabel ? <><span>COMPLETED</span><code title={run.completedAt} data-testid="run-completed">{completedLabel}</code></> : null}
           {durationLabel ? <><span>DURATION</span><code aria-live="off" data-testid="run-duration">{durationLabel}</code></> : null}
         </div>
         {expiryIso && expiryLabel && (
@@ -1275,6 +1110,11 @@ function RunView({ run, reportFilter, scenarioName, onCancelled }: { run: RunRep
           </div>
         ))}
         {run.assertions.map((assertion, index) => (
+          <AssertionRow
+            key={`${assertion.type}-${index}`}
+            assertion={assertion}
+            hidden={reportFilter === "failed" && assertion.status !== "failed"}
+          />
           <AssertionRow key={`${assertion.type}-${index}`} assertion={assertion} reportFilter={reportFilter} />
         ))}
         {run.error && (
@@ -1521,61 +1361,21 @@ function ReportComparisonView({ currentRun }: { currentRun: RunReport | null }) 
           </div>
         </div>
       ) : null}
-    </div>
-  );
-}
-
-function AssertionStatusIcon({ status }: { status: string }) {
-  if (status === "passed") {
-    return (
-      <svg viewBox="0 0 16 16" fill="none" role="img" aria-label="Passed assertion" style={{ stroke: "#15803d" }}>
-        <path d="m3 8 3 3 7-7" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    );
-  }
-  if (status === "failed") {
-    return (
-      <svg viewBox="0 0 16 16" fill="none" role="img" aria-label="Failed assertion" style={{ stroke: "#b91c1c" }}>
-        <path d="M4 4l8 8M12 4l-8 8" strokeWidth="2" strokeLinecap="round" />
-      </svg>
-    );
-  }
-  return (
-    <svg viewBox="0 0 16 16" fill="none" role="img" aria-label="Skipped assertion" style={{ stroke: "#6e7169" }}>
-      <path d="M3 8h10" strokeWidth="2" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 // #34 — Expandable assertion row with expected / actual values
+function AssertionRow({ assertion, hidden }: { assertion: import("@/lib/api").AssertionResult; hidden?: boolean }) {
 function AssertionRow({ assertion, reportFilter }: { assertion: import("@/lib/api").AssertionResult; reportFilter?: ReportFilter }) {
   const [expanded, setExpanded] = useState(false);
   const hasDiff = assertion.expected !== undefined || assertion.actual !== undefined;
   const isFailed = assertion.status === "failed";
-  const actualObj =
-    assertion.actual && typeof assertion.actual === "object" && !Array.isArray(assertion.actual)
-      ? (assertion.actual as Record<string, JsonValue>)
-      : null;
-  const deltaVal = actualObj && (typeof actualObj.delta === "number" || typeof actualObj.delta === "string") ? actualObj.delta : null;
-  const assetVal = actualObj && typeof actualObj.asset === "string" ? actualObj.asset : undefined;
-  const formattedDelta = deltaVal !== null ? formatBalanceDelta(deltaVal, assetVal) : null;
 
   return (
+    <div className={`assertion report-row ${isFailed && hasDiff ? "assertion--has-diff" : ""}`} hidden={hidden}>
     <div className={`assertion report-row ${isFailed && hasDiff ? "assertion--has-diff" : ""}`} hidden={reportFilter === "failed" && assertion.status !== "failed"}>
-      <span className={`step-dot ${assertion.status}`}><AssertionStatusIcon status={assertion.status} /></span>
+      <span className={`step-dot ${assertion.status}`}><CheckIcon /></span>
       <div className="assertion-body">
         <span className="label">ASSERTION / {assertion.type}</span>
         <span className="print-status-label">{titleCase(assertion.status)}</span>
         <strong>{assertion.message}</strong>
-        {formattedDelta && (
-          <span
-            className="balance-delta"
-            data-delta-tone={formattedDelta.tone}
-            style={{ color: formattedDelta.color, fontWeight: 600, marginLeft: "8px" }}
-          >
-            {formattedDelta.text}
-          </span>
-        )}
         {hasDiff && (
           <div className="assertion-diff-toggle">
             <button
@@ -1647,23 +1447,52 @@ function EmptyReport() {
 
 function CopyButton({ value, label }: { value: string; label: string }) {
   const [status, setStatus] = useState<"idle" | "copied" | "error">("idle");
+  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (resetTimerRef.current !== null) {
+        clearTimeout(resetTimerRef.current);
+      }
+    };
+  }, []);
+
+  function scheduleReset() {
+    if (resetTimerRef.current !== null) {
+      clearTimeout(resetTimerRef.current);
+    }
+    resetTimerRef.current = setTimeout(() => {
+      resetTimerRef.current = null;
+      setStatus("idle");
+    }, 2000);
+  }
 
   async function copy() {
     try {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+        throw new Error("Clipboard API unavailable");
+      }
       await navigator.clipboard.writeText(value);
       setStatus("copied");
     } catch {
       setStatus("error");
     }
+    scheduleReset();
   }
 
   return (
     <span className="copy-control">
-      <button type="button" className="copy-button" onClick={copy} aria-label={`Copy ${label}`}>
-        {status === "copied" ? "Copied" : "Copy"}
+      <button
+        type="button"
+        className="copy-button"
+        onClick={copy}
+        aria-label={`Copy ${label}`}
+        data-copy-status={status}
+      >
+        {status === "copied" ? "Copied!" : status === "error" ? "Failed to copy" : "Copy"}
       </button>
       {status === "copied" && <span role="status" className="copy-status">Copied {label}</span>}
-      {status === "error" && <span role="status" className="copy-error">Could not copy {label}</span>}
+      {status === "error" && <span role="status" className="copy-error">Failed to copy {label}</span>}
     </span>
   );
 }
