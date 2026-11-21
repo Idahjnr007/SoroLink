@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Dashboard, filterScenario, formatStepDuration } from "./dashboard";
+import { Dashboard, filterScenario, formatStepDuration, getPollingDelay } from "./dashboard";
 import * as api from "@/lib/api";
 import { type RunReport } from "@/lib/api";
 
@@ -1206,6 +1206,147 @@ describe("Dashboard Report Download Feedback (#45)", () => {
   });
 });
 
+describe("Issues #16, #21, #24, #25", () => {
+  beforeEach(() => {
+    mockSearchParams = new URLSearchParams();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("#16 — backs off polling interval exponentially (1s -> 2s -> 4s -> 8s cap) and stops on terminal state", async () => {
+    expect(getPollingDelay(0, 0)).toBe(1000);
+    expect(getPollingDelay(1, 0)).toBe(2000);
+    expect(getPollingDelay(2, 0)).toBe(4000);
+    expect(getPollingDelay(3, 0)).toBe(8000);
+    expect(getPollingDelay(4, 0)).toBe(8000);
+
+    vi.useFakeTimers();
+    vi.spyOn(api, "listScenarios").mockResolvedValueOnce(mockScenarios);
+    vi.spyOn(api, "startRun").mockResolvedValueOnce({
+      ...mockRun,
+      id: "run-backoff",
+      scenarioId: "xlm-payment",
+      status: "running",
+    });
+    const getRunMock = vi
+      .spyOn(api, "getRun")
+      .mockResolvedValueOnce({ ...mockRun, id: "run-backoff", scenarioId: "xlm-payment", status: "running" })
+      .mockResolvedValueOnce({ ...mockRun, id: "run-backoff", scenarioId: "xlm-payment", status: "running" })
+      .mockResolvedValueOnce({ ...mockRun, id: "run-backoff", scenarioId: "xlm-payment", status: "passed" });
+
+    render(<Dashboard />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const runBtn = screen.getByRole("button", { name: /run on testnet/i });
+    await act(async () => {
+      fireEvent.click(runBtn);
+      await Promise.resolve();
+    });
+
+    // 1st poll after 1s
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(getRunMock).toHaveBeenCalledTimes(1);
+
+    // 2nd poll after 2s (not at 1s)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(getRunMock).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+
+    // 3rd poll after 4s reaches terminal status and stops
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(getRunMock).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    expect(getRunMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("#21 — Print report button triggers window.print()", async () => {
+    mockSearchParams = new URLSearchParams("runId=run-123");
+    vi.spyOn(api, "listScenarios").mockResolvedValueOnce(mockScenarios);
+    vi.spyOn(api, "getRun").mockResolvedValueOnce({ ...mockRun, status: "passed" });
+    const printSpy = vi.spyOn(window, "print").mockImplementation(() => {});
+
+    render(<Dashboard />);
+    const printBtn = await screen.findByRole("button", { name: /print report/i });
+    fireEvent.click(printBtn);
+    expect(printSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("#24 — renders accessible passed, failed, and skipped icons on assertion rows", async () => {
+    mockSearchParams = new URLSearchParams("runId=run-icons");
+    vi.spyOn(api, "listScenarios").mockResolvedValueOnce(mockScenarios);
+    vi.spyOn(api, "getRun").mockResolvedValueOnce({
+      ...mockRun,
+      id: "run-icons",
+      status: "failed",
+      assertions: [
+        { type: "balance", status: "passed", expected: 10, actual: 10, message: "Passed check" },
+        { type: "balance", status: "failed", expected: 10, actual: 0, message: "Failed check" },
+        { type: "balance", status: "skipped" as unknown as "passed", expected: 1, actual: 1, message: "Skipped check" },
+      ],
+    });
+
+    render(<Dashboard />);
+    await screen.findByText("Passed check");
+    expect(screen.getByRole("img", { name: "Passed assertion" })).toBeDefined();
+    expect(screen.getByRole("img", { name: "Failed assertion" })).toBeDefined();
+    expect(screen.getByRole("img", { name: "Skipped assertion" })).toBeDefined();
+  });
+
+  it("#25 — updates browser tab title for running, passed, failed, and idle states", async () => {
+    vi.spyOn(api, "listScenarios").mockResolvedValueOnce(mockScenarios);
+    vi.spyOn(api, "startRun")
+      .mockResolvedValueOnce({ ...mockRun, id: "r1", scenarioId: "xlm-payment", status: "running" })
+      .mockResolvedValueOnce({ ...mockRun, id: "r2", scenarioId: "xlm-payment", status: "failed" });
+    vi.spyOn(api, "getRun").mockResolvedValueOnce({
+      ...mockRun,
+      id: "r1",
+      scenarioId: "xlm-payment",
+      status: "passed",
+    });
+
+    vi.useFakeTimers();
+    render(<Dashboard />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(document.title).toBe("SoroLink – Stellar Testing Dashboard");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /run on testnet/i }));
+      await Promise.resolve();
+    });
+    expect(document.title).toBe("⏳ Running xlm-payment – SoroLink");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(document.title).toBe("✅ xlm-payment passed – SoroLink");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /run on testnet/i }));
+      await Promise.resolve();
+    });
+    expect(document.title).toBe("❌ xlm-payment failed – SoroLink");
+  });
+});
 
 describe("Scenario Trustline Filtering, Copy-to-Clipboard, and Run Timestamps (#1, #2, #3)", () => {
   beforeEach(() => {
