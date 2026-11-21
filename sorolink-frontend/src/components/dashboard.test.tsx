@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Dashboard, filterScenario, getPollingDelay } from "./dashboard";
+import { Dashboard, filterScenario, formatStepDuration, getPollingDelay } from "./dashboard";
 import * as api from "@/lib/api";
 import { type RunReport } from "@/lib/api";
 
@@ -1345,5 +1345,144 @@ describe("Issues #16, #21, #24, #25", () => {
       await Promise.resolve();
     });
     expect(document.title).toBe("❌ xlm-payment failed – SoroLink");
+  });
+});
+
+describe("Scenario Trustline Filtering, Copy-to-Clipboard, and Run Timestamps (#1, #2, #3)", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams();
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams();
+  });
+
+  it("filters Trustline scenarios and persists filter while a run is in progress (#1)", async () => {
+    expect(filterScenario(mockScenarios[0], "trustline")).toBe(false);
+    expect(filterScenario(mockScenarios[1], "trustline")).toBe(true);
+    expect(filterScenario(mockScenarios[2], "trustline")).toBe(true);
+
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("03 AVAILABLE")).toBeDefined();
+    });
+
+    const trustlinesTab = screen.getByRole("tab", { name: "Trustlines" });
+    fireEvent.click(trustlinesTab);
+
+    expect(trustlinesTab.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("02 AVAILABLE")).toBeDefined();
+    expect(screen.queryByText("XLM payment")).toBeNull();
+    expect(screen.getAllByText("Issued asset payment").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Missing trustline").length).toBeGreaterThan(0);
+  });
+
+  it("copies run ID and step transaction hashes with 2-second Copied! reset and error handling (#2)", async () => {
+    vi.useFakeTimers();
+    mockSearchParams = new URLSearchParams("?runId=run-copy-test");
+
+    const writeTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: writeTextMock },
+    });
+
+    const runWithTx: RunReport = {
+      ...mockRun,
+      id: "run-copy-test",
+      status: "passed",
+      createdAt: "2026-10-16T12:00:00.000Z",
+      completedAt: "2026-10-16T12:00:04.000Z",
+      steps: [
+        {
+          id: "send-payment",
+          type: "payment",
+          status: "passed",
+          message: "Payment submitted",
+          transactionHash: "tx-hash-abcdef123456",
+        },
+      ],
+    };
+    vi.spyOn(api, "getRun").mockResolvedValue(runWithTx);
+
+    render(<Dashboard />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const copyRunBtn = screen.getByRole("button", { name: "Copy run ID" });
+    const copyTxBtn = screen.getByRole("button", { name: "Copy transaction tx-hash-abcdef123456" });
+
+    await act(async () => {
+      fireEvent.click(copyRunBtn);
+      await Promise.resolve();
+    });
+
+    expect(writeTextMock).toHaveBeenCalledWith("run-copy-test");
+    expect(copyRunBtn.textContent).toBe("Copied!");
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(copyRunBtn.textContent).toBe("Copy");
+
+    writeTextMock.mockRejectedValueOnce(new Error("Clipboard denied"));
+    await act(async () => {
+      fireEvent.click(copyTxBtn);
+      await Promise.resolve();
+    });
+    expect(writeTextMock).toHaveBeenCalledWith("tx-hash-abcdef123456");
+    expect(copyTxBtn.textContent).toBe("Failed to copy");
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(copyTxBtn.textContent).toBe("Copy");
+  });
+
+  it("displays Created, Completed, and Duration with ISO 8601 titles for terminal runs and omits Completed for active runs (#3)", async () => {
+    mockSearchParams = new URLSearchParams("?runId=run-timestamps");
+    const createdIso = "2026-10-16T12:00:00.000Z";
+    const completedIso = "2026-10-16T12:01:34.000Z";
+
+    const terminalReport: RunReport = {
+      ...mockRun,
+      id: "run-timestamps",
+      status: "passed",
+      createdAt: createdIso,
+      completedAt: completedIso,
+    };
+    vi.spyOn(api, "getRun").mockResolvedValueOnce(terminalReport);
+
+    const { unmount } = render(<Dashboard />);
+    const createdEl = await screen.findByTestId("run-created");
+    const completedEl = await screen.findByTestId("run-completed");
+    const durationEl = await screen.findByTestId("run-duration");
+
+    expect(createdEl.getAttribute("title")).toBe(createdIso);
+    expect(completedEl.getAttribute("title")).toBe(completedIso);
+    expect(durationEl.textContent).toBe("1m 34s");
+
+    unmount();
+
+    const inProgressReport: RunReport = {
+      ...mockRun,
+      id: "run-timestamps",
+      status: "running",
+      createdAt: createdIso,
+      completedAt: undefined,
+    };
+    vi.spyOn(api, "getRun").mockResolvedValue(inProgressReport);
+
+    render(<Dashboard />);
+    const activeCreatedEl = await screen.findByTestId("run-created");
+    expect(activeCreatedEl.getAttribute("title")).toBe(createdIso);
+    expect(screen.queryByTestId("run-completed")).toBeNull();
   });
 });

@@ -14,7 +14,7 @@ export function getPollingDelay(pollAttempt: number, consecutiveFailures: number
   return Math.min(1000 * Math.pow(2, Math.max(0, pollAttempt)), 8000);
 }
 
-export type ScenarioFilter = "all" | "xlm" | "issued-asset" | "expected-failure";
+export type ScenarioFilter = "all" | "xlm" | "issued-asset" | "trustline" | "expected-failure";
 export type SortOrder = "name-asc" | "name-desc" | "id-asc";
 export type ReportFilter = "all" | "failed";
 
@@ -41,6 +41,7 @@ export const FILTER_OPTIONS: { key: ScenarioFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "xlm", label: "XLM" },
   { key: "issued-asset", label: "Issued Asset" },
+  { key: "trustline", label: "Trustlines" },
   { key: "expected-failure", label: "Expected Failure" },
 ];
 
@@ -61,6 +62,7 @@ export function filterScenario(scenario: ScenarioSummary, filter: ScenarioFilter
   const text = `${scenario.id} ${scenario.name} ${scenario.description}`.toLowerCase();
   if (filter === "xlm") return text.includes("xlm");
   if (filter === "issued-asset") return text.includes("issued") || text.includes("testusd") || scenario.id === "issued-asset-payment";
+  if (filter === "trustline") return text.includes("trustline");
   if (filter === "expected-failure") return text.includes("fail") || text.includes("missing-trustline") || scenario.id === "missing-trustline";
   return true;
 }
@@ -1221,8 +1223,8 @@ function RunView({ run, reportFilter, scenarioName, onCancelled }: { run: RunRep
         <div className="report-meta">
           <span>RUN ID</span><div className="id-cell"><code>{run.id}</code><CopyButton value={run.id} label="run ID" /></div>
           <span>NETWORK</span><code>{run.network}</code>
-          <span>CREATED</span><code title={run.createdAt}>{createdLabel}</code>
-          {completedLabel ? <><span>COMPLETED</span><code title={run.completedAt}>{completedLabel}</code></> : null}
+          <span>CREATED</span><code title={run.createdAt} data-testid="run-created">{createdLabel}</code>
+          {isTerminal && completedLabel ? <><span>COMPLETED</span><code title={run.completedAt} data-testid="run-completed">{completedLabel}</code></> : null}
           {durationLabel ? <><span>DURATION</span><code aria-live="off" data-testid="run-duration">{durationLabel}</code></> : null}
         </div>
         {expiryIso && expiryLabel && (
@@ -1647,23 +1649,52 @@ function EmptyReport() {
 
 function CopyButton({ value, label }: { value: string; label: string }) {
   const [status, setStatus] = useState<"idle" | "copied" | "error">("idle");
+  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (resetTimerRef.current !== null) {
+        clearTimeout(resetTimerRef.current);
+      }
+    };
+  }, []);
+
+  function scheduleReset() {
+    if (resetTimerRef.current !== null) {
+      clearTimeout(resetTimerRef.current);
+    }
+    resetTimerRef.current = setTimeout(() => {
+      resetTimerRef.current = null;
+      setStatus("idle");
+    }, 2000);
+  }
 
   async function copy() {
     try {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+        throw new Error("Clipboard API unavailable");
+      }
       await navigator.clipboard.writeText(value);
       setStatus("copied");
     } catch {
       setStatus("error");
     }
+    scheduleReset();
   }
 
   return (
     <span className="copy-control">
-      <button type="button" className="copy-button" onClick={copy} aria-label={`Copy ${label}`}>
-        {status === "copied" ? "Copied" : "Copy"}
+      <button
+        type="button"
+        className="copy-button"
+        onClick={copy}
+        aria-label={`Copy ${label}`}
+        data-copy-status={status}
+      >
+        {status === "copied" ? "Copied!" : status === "error" ? "Failed to copy" : "Copy"}
       </button>
       {status === "copied" && <span role="status" className="copy-status">Copied {label}</span>}
-      {status === "error" && <span role="status" className="copy-error">Could not copy {label}</span>}
+      {status === "error" && <span role="status" className="copy-error">Failed to copy {label}</span>}
     </span>
   );
 }
