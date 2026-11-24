@@ -374,6 +374,11 @@ describe("SoroLink API", () => {
     await vi.waitFor(async () => {
       const response = await app.inject({ method: "GET", url: `/api/v1/runs/${id}` });
       expect(response.json().status).toBe("passed");
+      expect(response.json().summary.totalDurationMs).toBeGreaterThanOrEqual(0);
+      for (const step of response.json().steps) {
+        expect(step.startedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+        expect(step.durationMs).toBeGreaterThanOrEqual(0);
+      }
       expect(response.body).not.toMatch(/S[A-Z2-7]{55}/);
     });
   });

@@ -52,7 +52,7 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
       status: "passed",
       completedAt: new Date().toISOString(),
       steps: [{ id: "pay", type: "payment", status: "passed", message: "Confirmed." }],
-      summary: { stepsPassed: 1, stepsFailed: 0, assertionsPassed: 0, assertionsFailed: 0 },
+      summary: { stepsPassed: 1, stepsFailed: 0, assertionsPassed: 0, assertionsFailed: 0, totalDurationMs: 0 },
     });
     expect(updated).toMatchObject({ id: run.id, status: "passed", steps: [{ id: "pay", status: "passed" }] });
     expect(await store.get(run.id)).toEqual(updated);
@@ -100,7 +100,7 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
         completedAt: "2026-11-20T10:00:01.234Z",
         durationMs: 1_234,
       }],
-      summary: { stepsPassed: 1, stepsFailed: 0, assertionsPassed: 0, assertionsFailed: 0 },
+      summary: { stepsPassed: 1, stepsFailed: 0, assertionsPassed: 0, assertionsFailed: 0, totalDurationMs: 1_234 },
     });
     await store.create(run);
 
@@ -258,7 +258,7 @@ function report(overrides: Partial<RunReport> = {}): RunReport {
     createdAt: new Date().toISOString(),
     steps: [],
     assertions: [],
-    summary: { stepsPassed: 0, stepsFailed: 0, assertionsPassed: 0, assertionsFailed: 0 },
+    summary: { stepsPassed: 0, stepsFailed: 0, assertionsPassed: 0, assertionsFailed: 0, totalDurationMs: 0 },
     ...overrides,
   };
 }
