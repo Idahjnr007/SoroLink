@@ -9,7 +9,7 @@ export interface ApiOperations {
   getScenario: { params: { scenarioId: string }; response: ValidatedScenario };
   /** Issue #70 — returns the canonical v1 scenario JSON Schema. */
   getScenarioSchemaV1: { response: Record<string, unknown> };
-  validateScenario: { body: ScenarioDefinition | string; response: { valid: true; scenarioId: string; scenarioVersion: number; schemaVersion: 1; contentHash: string } };
+  validateScenario: { body: ScenarioDefinition | string; query: { dryRun?: "true" | "false" }; response: { valid: true; scenarioId: string; scenarioVersion: number; schemaVersion: 1; contentHash: string; dryRun?: true } | { valid: false; errors: Array<{ code: string; path?: string; message: string }>; error: { code: string; message: string; requestId: string; details: string[]; errors: Array<{ code: string; path?: string; message: string }> } } };
   listScenarioVersions: { params: { scenarioId: string }; query: { limit?: number; cursor?: number }; response: { items: ScenarioVersionSummary[]; nextCursor?: number } };
   getScenarioVersion: { params: { scenarioId: string; version: number }; response: ValidatedScenario };
   exportScenarioVersion: { params: { scenarioId: string; version: number }; query: { format?: "json" | "yaml" }; response: string };

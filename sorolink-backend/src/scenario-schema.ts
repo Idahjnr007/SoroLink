@@ -95,6 +95,11 @@ export function validateScenarioDefinition(value: unknown): ScenarioDefinition {
   return structuredClone(value);
 }
 
+export function validateScenarioSchemaOnly(value: unknown): ScenarioDefinition {
+  if (!validateSchema(value)) throw new ScenarioValidationError(formatAjvErrors(validateSchema.errors));
+  return structuredClone(value);
+}
+
 function validateSafeValues(value: unknown): void {
   const issues: string[] = [];
   const visit = (item: unknown, path: string): void => {

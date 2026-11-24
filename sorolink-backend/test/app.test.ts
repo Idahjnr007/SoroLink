@@ -183,6 +183,65 @@ describe("SoroLink API", () => {
     expect(started.json().scenarioContentHash).toBe(validated.json().contentHash);
   });
 
+  it("performs semantic dry-run validation without calling Testnet", async () => {
+    const execute = vi.fn(async (_scenario: Scenario): Promise<LedgerExecution> => ({
+      steps: [],
+      assertions: [],
+    }));
+    const app = createApp({ ledger: { execute } });
+    const definition = completeScenario();
+    definition.accounts = [{ id: "sender", generate: true, fund: true }];
+    definition.steps = [{
+      id: "pay",
+      type: "payment",
+      from: "missing-sender",
+      to: "missing-recipient",
+      asset: "xlm",
+      amount: "1",
+    }];
+    definition.assertions = [{ type: "accountExists", account: "missing-account" }];
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/scenarios/validate?dryRun=true",
+      payload: definition,
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().valid).toBe(false);
+    expect(response.json().errors).toBeInstanceOf(Array);
+    expect(response.json().errors.length).toBeGreaterThan(0);
+    expect(response.json().error.details.length).toBeGreaterThan(0);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("treats dryRun=true as a full local validation and schema-only validation as semantic-free", async () => {
+    const execute = vi.fn(async (_scenario: Scenario): Promise<LedgerExecution> => ({
+      steps: [],
+      assertions: [],
+    }));
+    const app = createApp({ ledger: { execute } });
+    const definition = completeScenario();
+    definition.accounts = [{ id: "issuer", generate: true, fund: true }];
+
+    const schemaOnly = await app.inject({
+      method: "POST",
+      url: "/api/v1/scenarios/validate",
+      payload: definition,
+    });
+    expect(schemaOnly.statusCode).toBe(200);
+
+    const dryRun = await app.inject({
+      method: "POST",
+      url: "/api/v1/scenarios/validate?dryRun=true",
+      payload: definition,
+    });
+    expect(dryRun.statusCode).toBe(400);
+    expect(dryRun.json().valid).toBe(false);
+    expect(dryRun.json().errors.length).toBeGreaterThan(0);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it("validates and starts a raw YAML scenario", async () => {
     const yaml = `schemaVersion: 1\nid: api-yaml\nversion: 1\nname: API YAML\ndescription: Submitted as YAML.\nnetwork: testnet\naccounts:\n  - { id: sender, generate: true, fund: true }\n  - { id: recipient, generate: true, fund: true }\nassets:\n  - { id: xlm, type: native }\nsteps:\n  - { id: pay, type: payment, from: sender, to: recipient, asset: xlm, amount: \"1\" }\nassertions:\n  - { type: stepSucceeded, step: pay }\n`;
     const app = createApp();
