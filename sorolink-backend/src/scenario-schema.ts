@@ -17,7 +17,7 @@ const nonNegativeAmount = { ...amount } as const;
 const signedAmount = { type: "string", pattern: "^-?(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,7})?$", maxLength: 21 } as const;
 const code = { type: "string", pattern: "^[A-Z0-9]{1,12}$", maxLength: 12 } as const;
 const resultCode = { type: "string", pattern: "^[a-z][a-z0-9_]{0,63}$", maxLength: 64 } as const;
-const memo = { type: "string", maxLength: TEXT_MEMO_MAX_BYTES, description: "Text memo: at most 28 UTF-8 bytes (not characters), including empty text. The server also rejects malformed Unicode and enforces the byte limit." } as const;
+const memo = { type: "string", maxLength: TEXT_MEMO_MAX_BYTES, pattern: "^[^\\u0000-\\u001F\\u007F-\\u009F\\u2028\\u2029]*$", description: "Text memo: at most 28 UTF-8 bytes (not characters), including empty text. The server rejects malformed Unicode, control characters, line separators, and over-28-byte values." } as const;
 
 export const scenarioSchemaV1 = {
   $id: "https://sorolink.dev/schemas/scenario-v1.json",
@@ -86,10 +86,10 @@ export function validateScenarioDefinition(value: unknown): ScenarioDefinition {
   validateAmounts(value);
   const memoIssues: string[] = [];
   for (const step of value.steps) {
-    if (step.type === "payment" && step.memo !== undefined && !isTextMemo(step.memo)) memoIssues.push(`step ${step.id} memo must be valid Unicode and at most 28 UTF-8 bytes`);
+    if (step.type === "payment" && step.memo !== undefined && !isTextMemo(step.memo)) memoIssues.push(`step ${step.id} memo must be valid Unicode, contain no control characters, and be at most 28 UTF-8 bytes`);
   }
   for (const assertion of value.assertions) {
-    if (assertion.type === "transactionMemoEquals" && !isTextMemo(assertion.memo)) memoIssues.push("assertion transactionMemoEquals memo must be valid Unicode and at most 28 UTF-8 bytes");
+    if (assertion.type === "transactionMemoEquals" && !isTextMemo(assertion.memo)) memoIssues.push("assertion transactionMemoEquals memo must be valid Unicode, contain no control characters, and be at most 28 UTF-8 bytes");
   }
   if (memoIssues.length) throw new ScenarioValidationError(memoIssues);
   return structuredClone(value);
