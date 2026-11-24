@@ -154,11 +154,21 @@ describe("SoroLink API", () => {
     expect(response.json().items[0].contentHash).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 
+  it.each(["json", "csv"])("returns 501 for run export in %s format without persistence", async (format) => {
+    const response = await createApp().inject({
+      method: "GET",
+      url: `/api/v1/runs/export?format=${format}`,
+    });
+    expect(response.statusCode).toBe(501);
+    expect(response.json().error.code).toBe("PERSISTENCE_REQUIRED");
+  });
+
   it("publishes an OpenAPI 3.1 document containing declarative endpoints", async () => {
     const response = await createApp().inject({ method: "GET", url: "/openapi.json" });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ openapi: "3.1.0" });
     expect(response.json().paths).toHaveProperty("/api/v1/runs/definitions");
+    expect(response.json().paths).toHaveProperty("/api/v1/runs/export");
     expect(response.json().paths).toHaveProperty("/api/v1/scenarios/{scenarioId}/versions");
     expect(response.json().paths).toHaveProperty("/api/v1/scenarios/{scenarioId}/versions/{version}/export");
     expect(response.json().components.schemas).toHaveProperty("ScenarioV1");

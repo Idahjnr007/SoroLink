@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 export type AppInstance = FastifyInstance & { runs: RunService };
 
@@ -22,7 +23,7 @@ import { RunCapacityError, RunAlreadyTerminalError, RunNotFoundError } from "./e
 import { DatabaseUnavailableError } from "./database.js";import { openApiDocument } from "./openapi.js";
 import { FixedWindowRateLimiter } from "./rate-limiter.js";
 import { RunService, type RunLifecycleLogger } from "./run-service.js";
-import { InMemoryRunStore } from "./run-store.js";
+import { InMemoryRunStore, type RunExportRow } from "./run-store.js";
 import { parseScenario, prepareScenario, parseScenarioSchemaOnly, prepareScenarioSchemaOnly, canonicalJson } from "./scenario-loader.js";
 import { scenarioSchemaV1, ScenarioValidationError } from "./scenario-schema.js";
 import { createScenarioRegistry } from "./scenarios.js";
@@ -72,6 +73,12 @@ const exportQuerySchema = {
   type: "object",
   additionalProperties: false,
   properties: { format: { type: "string", enum: ["json", "yaml"] } },
+} as const;
+
+const runExportQuerySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { format: { type: "string", enum: ["json", "csv"], default: "json" } },
 } as const;
 
 const validateQuerySchema = {
@@ -315,6 +322,26 @@ export function buildApp(options: BuildAppOptions): AppInstance {
     return reply.code(202).send(await runs.start(scenario, request.id));
   });
 
+  app.get<{ Querystring: { format?: "json" | "csv" } }>("/api/v1/runs/export", { schema: { querystring: runExportQuerySchema } }, async (request, reply) => {
+    if (!persistence.runStore) {
+      return reply.code(501).send(apiError(
+        "PERSISTENCE_REQUIRED",
+        "Bulk run export requires persistent run history.",
+        request.id,
+      ));
+    }
+    const format = request.query.format ?? "json";
+    reply.header("content-disposition", `attachment; filename=sorolink-runs.${format}`);
+    if (format === "csv") {
+      reply.type("text/csv; charset=utf-8");
+      const stream = Readable.from(csvRunExport(persistence.runStore.exportRows()));
+      return reply.send(stream);
+    }
+    reply.type("application/json; charset=utf-8");
+    const stream = Readable.from(jsonRunExport(persistence.runStore.exportRows()));
+    return reply.send(stream);
+  });
+
   app.get<{ Params: { runId: string } }>("/api/v1/runs/:runId", async (request, reply) => {
     const run = await runs.get(request.params.runId);
     if (!run) return reply.code(404).send(apiError("RUN_NOT_FOUND", "The requested run does not exist.", request.id));
@@ -469,6 +496,37 @@ function withRetentionMetadata<T extends RunReport>(run: T, retentionMs: number)
   if ((run.status !== "passed" && run.status !== "failed" && run.status !== "cancelled") || !run.completedAt) return run;
   const expiresAt = new Date(Date.parse(run.completedAt) + retentionMs).toISOString();
   return { ...run, expiresAt };
+}
+
+async function* jsonRunExport(rows: AsyncIterable<RunExportRow>): AsyncGenerator<string> {
+  yield "[";
+  let first = true;
+  for await (const row of rows) {
+    if (!first) yield ",";
+    yield JSON.stringify(row.report);
+    first = false;
+  }
+  yield "]";
+}
+
+async function* csvRunExport(rows: AsyncIterable<RunExportRow>): AsyncGenerator<string> {
+  yield "runId,scenarioId,status,createdAt,completedAt,durationMs\r\n";
+  for await (const row of rows) {
+    const values = [
+      row.runId,
+      row.scenarioId,
+      row.status,
+      row.createdAt,
+      row.completedAt ?? "",
+      String(row.durationMs),
+    ];
+    yield `${values.map(csvField).join(",")}\r\n`;
+  }
+}
+
+function csvField(value: string): string {
+  if (!/[",\r\n]/.test(value)) return value;
+  return `"${value.replace(/"/g, '""')}"`;
 }
 
 // ── Issue #77: unsupported content type ────────────────────────────────────

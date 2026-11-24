@@ -4,6 +4,7 @@ import type { ScenarioVersionSummary } from "../published-scenarios.js";
 
 export interface ApiOperations {
   getHealth: { response: { status: "ok"; network: "testnet" } };
+  getMetrics: { response: string };
   getReadiness: { response: { status: "ready" | "unavailable"; network: "testnet"; database: "disabled" | "ready" | "unavailable" } };
   listScenarios: { response: { items: ScenarioSummary[] } };
   getScenario: { params: { scenarioId: string }; response: ValidatedScenario };
@@ -17,10 +18,10 @@ export interface ApiOperations {
   startCataloguedRun: { body: { scenarioId: string; scenarioVersion?: number; inputs?: Record<string, never> }; headers?: { "idempotency-key"?: string }; response: RunReport };
   /** Issue #72 — Idempotency-Key header deduplicates within the retention window. */
   startDefinitionRun: { body: ScenarioDefinition | string; headers?: { "idempotency-key"?: string }; response: RunReport };
+  exportRuns: { query: { format?: "json" | "csv" }; response: RunReport[] | string };
   getRun: { params: { runId: string }; response: RunReport };
-  downloadRunReport: { params: { runId: string }; response: RunReport };
-  /** Issue #40 — transitions an active run to the cancelled terminal state. */
   cancelRun: { params: { runId: string }; response: RunReport };
+  downloadRunReport: { params: { runId: string }; response: RunReport };
 }
 
 export type ApiOperationId = keyof ApiOperations;

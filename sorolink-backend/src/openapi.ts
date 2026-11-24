@@ -84,6 +84,18 @@ export function openApiDocument() {
       "/api/v1/scenarios/{scenarioId}/versions": { get: { operationId: "listScenarioVersions", description: "Rejects unknown query parameters, duplicate query keys, and non-integer-text limit/cursor values (decimals, scientific notation, empty strings) with 400 INVALID_REQUEST (issue #78).", parameters: [scenarioIdParameter, { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 20 } }, { name: "cursor", in: "query", schema: { type: "integer", minimum: 1 } }], responses: { "200": { description: "Bounded immutable version history", content: { "application/json": { schema: { type: "object", required: ["items"], properties: { items: { type: "array", items: { $ref: "#/components/schemas/ScenarioSummary" } }, nextCursor: { type: "integer" } } } } } }, "400": { description: "INVALID_REQUEST — malformed scenarioId, limit, or cursor, or unknown query parameter", ...apiErrorContent }, "503": { description: "Persistence not enabled or unavailable", ...apiErrorContent } } } },
       "/api/v1/scenarios/{scenarioId}/versions/{version}": { get: { operationId: "getScenarioVersion", description: "Rejects a non-integer-text version path segment with 400 INVALID_REQUEST (issue #78).", parameters: [scenarioIdParameter, versionParameter], responses: { "200": { description: "Exact immutable scenario version", content: { "application/json": { schema: { $ref: "#/components/schemas/ScenarioV1" } } } }, "400": { description: "INVALID_REQUEST — malformed scenarioId or version", ...apiErrorContent }, "404": { description: "Not found", ...apiErrorContent } } } },
       "/api/v1/scenarios/{scenarioId}/versions/{version}/export": { get: { operationId: "exportScenarioVersion", description: "Rejects unknown query parameters, a non-integer-text version, or an unrecognised format with 400 INVALID_REQUEST (issue #78).", parameters: [scenarioIdParameter, versionParameter, { name: "format", in: "query", schema: { type: "string", enum: ["json", "yaml"], default: "json" } }], responses: { "200": { description: "Canonical version export", content: { "application/json": { schema: { $ref: "#/components/schemas/ScenarioV1" } }, "application/yaml": { schema: { type: "string" } } } }, "400": { description: "INVALID_REQUEST — malformed scenarioId, version, or format, or unknown query parameter", ...apiErrorContent }, "404": { description: "Not found", ...apiErrorContent } } } },
+      "/api/v1/runs/export": {
+        get: {
+          operationId: "exportRuns",
+          description: "Streams all retained persistent run reports. JSON returns the full reports; CSV returns runId, scenarioId, status, createdAt, completedAt, and durationMs.",
+          parameters: [{ name: "format", in: "query", required: false, schema: { type: "string", enum: ["json", "csv"], default: "json" } }],
+          responses: {
+            "200": { description: "Streamed run export", content: { "application/json": { schema: { type: "array", items: { $ref: "#/components/schemas/RunReport" } } }, "text/csv": { schema: { type: "string" } } } },
+            "400": { description: "Invalid export format", ...apiErrorContent },
+            "501": { description: "Persistent run history is not enabled", ...apiErrorContent },
+          },
+        },
+      },
       "/api/v1/runs": {
         post: {
           operationId: "startCataloguedRun",
